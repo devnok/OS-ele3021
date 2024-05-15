@@ -120,6 +120,10 @@ void            userinit(void);
 int             wait(void);
 void            wakeup(void*);
 void            yield(void);
+int             setpriority(int, int);
+int             setmonopoly(int, char*);
+void            monopolize(void);
+void            unmonopolize(void);
 
 // swtch.S
 void            swtch(struct context**, struct context*);

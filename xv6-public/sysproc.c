@@ -7,6 +7,8 @@
 #include "mmu.h"
 #include "proc.h"
 
+char PASSWORD[11] = "2019065650";
+
 int
 sys_fork(void)
 {
@@ -51,6 +53,40 @@ int sys_getgpid(void) {
 int sys_yield(void) {
 	yield();
 	return 0;
+}
+int sys_getlev(void) {
+	return myproc()->lev;
+}
+int sys_setpriority(void) {
+  int pid;
+  int priority;
+  if(argint(0, &pid) < 0)
+    return -1;
+  if(argint(1, &priority) < 0)
+    return -1;
+  if(priority < 0 || priority > 10)
+    return -2;
+  return setpriority(pid, priority);
+}
+int sys_setmonopoly(void) {
+  int pid;
+  char* password;
+  if(argint(0, &pid) < 0)
+    return -1;
+  if(argstr(1, &password) < 0)
+    return -1;
+  for(int i=0;password[i]!=0&&PASSWORD[i]!=0;i++){
+    if(password[i] != PASSWORD[i]) return -2;
+  }
+  return setmonopoly(pid, password);
+}
+int sys_monopolize(void) {
+  monopolize();
+  return 0;
+}
+int sys_unmonopolize(void) {
+  unmonopolize();
+  return 0;
 }
 
 int

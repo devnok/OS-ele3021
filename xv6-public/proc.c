@@ -12,6 +12,11 @@ struct {
   struct proc proc[NPROC];
 } ptable;
 
+struct fq mlfq[4];
+struct moq mq;
+uint stick;
+struct proc** nowj[4];
+
 static struct proc *initproc;
 
 int nextpid = 1;
@@ -65,6 +70,121 @@ myproc(void) {
   return p;
 }
 
+int popq(struct proc *p){
+  struct proc **it;
+  if(p->lev == 99) {
+    for(it=mq.proc;it!=&mq.proc[NPROC];++it){
+      if(*it == p) {
+        *it = 0;
+        mq.size--;
+        if(mq.size == 0) mq.monopolized = 0;
+        return 0;
+      }
+    }
+  }
+  else mlfq[p->lev].proc[p->qidx] = 0;
+
+  p->lev = -1;
+
+  return 0;
+}
+
+int pushq(int lev, struct proc *p){
+  struct fq *q = &mlfq[lev];
+  struct proc **it;
+  
+  for(it=q->proc;it!=&q->proc[NPROC];++it){
+    if(*it == 0) {
+      *it = p;
+      p->tq = 0;
+      p->lev = lev;
+      p->qidx = it - q->proc;
+      return 0;
+    }
+  }
+  cprintf("There is no space for this process(%d) in L%d\n", p->pid, lev);
+  return -1;
+}
+
+int pushmoq(struct proc *p){
+  struct moq *q = &mq;
+  struct proc **it;
+  
+  for(it=q->proc;it!=&q->proc[NPROC];++it){
+    if(*it == 0) {
+      *it = p;
+      p->lev = 99;
+      return ++q->size;
+    }
+  }
+  cprintf("There is no space for this process(%d) in MoQ\n", p->pid);
+  return -1;
+}
+
+void priority_boosting(void){
+	stick=ticks;
+	struct proc *p;
+
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; ++p){
+      if(p == 0) continue;
+			if(p->lev != 0 && p->lev != 99){
+        mlfq[p->lev].proc[p->qidx] = 0;
+        pushq(0, p);
+      }
+			else p->tq = 0;
+	}
+}
+
+int setpriority(int pid, int priority) {
+  struct proc *p;
+
+  acquire(&ptable.lock);
+
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->pid == pid) {
+      p->priority = priority;
+      release(&ptable.lock);
+      return 0;
+    }
+  }
+  release(&ptable.lock);
+  cprintf("There is no process for pid %d\n", p->pid);
+  return -1;
+}
+
+int setmonopoly(int pid, char* password) {
+  struct proc *p;
+
+  acquire(&ptable.lock);
+
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->pid == pid) {
+      popq(p);
+      int size = pushmoq(p);
+      release(&ptable.lock);
+      return size;
+    }
+  }
+  release(&ptable.lock);
+  cprintf("There is no process for pid %d\n", p->pid);
+  return -1;
+}
+
+void monopolize(void) {
+  acquire(&ptable.lock);
+  mq.monopolized = 1;
+  release(&ptable.lock);
+}
+void unmonopolize(void) {
+  acquire(&ptable.lock);
+  mq.monopolized = 0;
+  release(&ptable.lock);
+
+  acquire(&tickslock);
+  stick=ticks;
+  release(&tickslock);
+}
+
 //PAGEBREAK: 32
 // Look in the process table for an UNUSED proc.
 // If found, change state to EMBRYO and initialize
@@ -88,6 +208,7 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+	pushq(0, p);
 
   release(&ptable.lock);
 
@@ -111,7 +232,7 @@ found:
   p->context = (struct context*)sp;
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
-
+	
   return p;
 }
 
@@ -263,6 +384,7 @@ exit(void)
 
   // Jump into the scheduler, never to return.
   curproc->state = ZOMBIE;
+  popq(curproc);
   sched();
   panic("zombie exit");
 }
@@ -286,6 +408,8 @@ wait(void)
       havekids = 1;
       if(p->state == ZOMBIE){
         // Found one.
+        if(p->lev >= 0) popq(p);
+        p->lev = 0;
         pid = p->pid;
         kfree(p->kstack);
         p->kstack = 0;
@@ -319,8 +443,9 @@ wait(void)
 //  - swtch to start running that process
 //  - eventually that process transfers control
 //      via swtch back to the scheduler.
+/*
 void
-scheduler(void)
+scheduler1(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
@@ -354,8 +479,138 @@ scheduler(void)
 
   }
 }
+*/
+void
+scheduler(void)
+{
+	int i, first, executed;
+  struct proc *p, *high;
+  struct proc **it;
+  struct fq *q;
+  struct cpu *c = mycpu();
+  c->proc = 0;
 
-// Enter scheduler.  Must hold only ptable.lock
+  // init queue
+  for(i=0;i<4;i++){
+    nowj[i] = mlfq[i].proc;
+  }
+
+  acquire(&tickslock);
+  stick = ticks;
+  release(&tickslock);
+
+  for(;;){
+    // Enable interrupts on this processor.
+    sti();
+    // Loop over process table looking for process to run.
+    acquire(&ptable.lock);
+
+    executed = 0;
+    if(mq.monopolized) {
+      high = 0;
+      for(it=mq.proc;it!=&mq.proc[NPROC];++it){
+        p = *it;
+        if(p == 0 || p->state != RUNNABLE)
+          continue;
+
+        if(high == 0 || high->pid > p->pid)
+          high = p;
+      }
+      if(high == 0){
+		    release(&ptable.lock);
+        continue;
+      }
+      p = high;
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      c->proc = 0;
+
+      executed = 1;
+    }
+		for(i = 0;!executed && i < 3; i++){
+			// from nowj[i] to nowj[i]-1
+      first = 1;
+      q = &mlfq[i];
+			for(it = nowj[i];; ++it) {
+        if(it == &q->proc[NPROC]) it = q->proc;
+        if(!first && it == nowj[i]) break;
+				first=0;
+        p = *it;
+				if(p == 0 || p->state != RUNNABLE) continue;
+				// Switch to chosen process.  It is the process's job
+      		// to release ptable.lock and then reacquire it
+				// before jumping back to us.
+				// cprintf("process %d(%d) started in L%d[j: %d]\n", p->pid, p->tq,i, p->qidx);
+				c->proc = p;
+				switchuvm(p);
+				p->state = RUNNING;
+
+				swtch(&(c->scheduler), p->context);
+				switchkvm();
+
+				// Process is done running for now.
+				// It should have changed its p->state before coming back.
+				c->proc = 0;
+
+				nowj[i] = it;
+
+				if(p->tq >= i*2+2) {
+          *it = 0;
+					if(i==0)
+						pushq(2-(p->pid % 2), p);
+					else
+						pushq(3, p);
+				}
+        acquire(&tickslock);
+				if(ticks-stick >= 100)
+					priority_boosting();
+        release(&tickslock);
+
+        executed = 1;
+        break;
+			}
+		}
+    if(!executed) {
+      high = 0;
+      q = &mlfq[3];
+      for(it=q->proc;it!=&q->proc[NPROC];++it){
+        p = *it;
+        if(p == 0 || p->state != RUNNABLE) // pid 1 case => p->tq initialized with 0
+          continue;
+
+        if(high == 0 || high->priority < p->priority) high = p;
+      }
+      if(high != 0){
+        p = high;
+        c->proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+
+        swtch(&(c->scheduler), p->context);
+        switchkvm();
+
+        c->proc = 0;
+      
+        if(p->tq>=8){
+          p->tq=0;
+          if(p->priority>0) p->priority--;
+        }
+
+        acquire(&tickslock);
+				if(ticks-stick >= 100)
+					priority_boosting();
+        release(&tickslock);
+      }
+    }
+		release(&ptable.lock);
+  }
+}
+
 // and have changed proc->state. Saves and restores
 // intena because intena is a property of this
 // kernel thread, not this CPU. It should

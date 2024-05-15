@@ -49,6 +49,23 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+	int tq;
+	int priority;								 // priority of L3 queue
+	int lev;										 // The level of the queue
+  int qidx;
+};
+
+// Per-feedback_queue state
+struct fq {
+	struct proc *proc[NPROC+1];
+};
+
+// monopoly queue state
+struct moq {
+	struct proc *proc[NPROC+1];
+  int monopolized;
+  int size;
 };
 
 // Process memory is laid out contiguously, low addresses first:
